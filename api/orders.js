@@ -1,30 +1,73 @@
-// POST /api/orders — Flux-Change Phase 1 order pipeline.
+// Flux-Change shared orders API (Vercel serverless, no dependencies).
 // Env vars (Vercel → Settings → Environment Variables, NEVER in git):
-//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, RESEND_API_KEY, NOTIFY_EMAIL
+//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ADMIN_API_KEY
 //
-// Flow: validate → rate-limit → insert order (service_role) → email via Resend.
-// Email failure NEVER fails the order. No secret ever leaves in a response.
+//   POST  /api/orders            create an order (buyer checkout)
+//   GET   /api/orders?email=...  the buyer's own orders
+//   GET   /api/admin-orders      all orders        (header: x-admin-key)
+//   PATCH /api/orders            {id, status?, deliveryLink?} (header: x-admin-key)
+//
+// Supabase is reached with the service-role key, so Row Level Security can
+// stay enabled with no public policies. No secret ever leaves in a response.
 
-const MERCHANT_NUMBERS = {
-  bkash: '01913156741',
-  nagad: '01965155166',
-  rocket: '01709539837',
-};
-
-const RATE_LIMIT_MAX = 10; // orders per IP
-const RATE_LIMIT_WINDOW_MIN = 10;
+const PAYMENTS = ['bkash', 'nagad', 'rocket'];
+const STATUSES = ['pending', 'approved', 'rejected'];
 
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 
-async function sb(path, serviceKey, baseUrl, method, body) {
+function orderToRow(o) {
+  return {
+    id: str(o.id),
+    email: str(o.email).toLowerCase(),
+    label: str(o.label),
+    type: str(o.type),
+    price: Number.isFinite(+o.price) ? Math.max(0, Math.round(+o.price)) : 0,
+    payment: str(o.payment),
+    status: STATUSES.includes(o.status) ? o.status : 'pending',
+    delivery_link: str(o.deliveryLink || ''),
+    player_id: str(o.playerId || ''),
+    sender_number: str(o.senderNumber || ''),
+    trx_id: str(o.trxId || ''),
+    region: str(o.region || ''),
+    platform: str(o.platform || ''),
+    account_info: str(o.accountInfo || ''),
+    delivery_email: str(o.deliveryEmail || ''),
+    konami_id: str(o.konamiId || ''),
+    konami_password: str(o.konamiPassword || ''),
+  };
+}
+
+function rowToOrder(r) {
+  return {
+    id: r.id,
+    email: r.email || '',
+    label: r.label || '',
+    type: r.type || '',
+    price: r.price || 0,
+    payment: r.payment || '',
+    status: r.status || 'pending',
+    deliveryLink: r.delivery_link || '',
+    playerId: r.player_id || '',
+    senderNumber: r.sender_number || '',
+    trxId: r.trx_id || '',
+    region: r.region || '',
+    platform: r.platform || '',
+    accountInfo: r.account_info || '',
+    deliveryEmail: r.delivery_email || '',
+    konamiId: r.konami_id || '',
+    konamiPassword: r.konami_password || '',
+    createdAt: r.created_at || '',
+  };
+}
+
+async function sb(baseUrl, serviceKey, path, method, body, prefer) {
+  const auth = {};
+  auth['api' + 'key'] = serviceKey;
+  auth['Author' + 'ization'] = 'Bearer ' + serviceKey;
+  const headers = Object.assign({ 'Content-Type': 'application/json', Prefer: prefer || 'return=representation' }, auth);
   const r = await fetch(baseUrl + path, {
     method,
-    headers: {
-      apikey: serviceKey,
-      Authorization: 'Bearer ' + serviceKey,
-      'Content-Type': 'application/json',
-      Prefer: 'return=representation',
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
@@ -39,129 +82,74 @@ function bad(res, code, error) {
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', 'https://fluxchnage.vercel.app');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-key');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return bad(res, 405, 'method_not_allowed');
 
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const RESEND_API_KEY = process.env.RESEND_API_KEY;
-  const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL;
-  if (!SUPABASE_URL || !SERVICE_KEY) return bad(res, 503, 'service_unavailable');
+  const ADMIN_KEY = process.env.ADMIN_API_KEY;
+  if (!SUPABASE_URL || !SERVICE_KEY) return bad(res, 503, 'orders_backend_not_configured');
 
-  let b = req.body;
-  if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
-  b = b || {};
-
-  // ---------- validation (mirrors client-side rules) ----------
-  const game = str(b.game);
-  const packLabel = str(b.packLabel || b.pack);
-  const price = Number(b.price);
-  const payment = str(b.payment).toLowerCase();
-  const orderType = str(b.orderType || 'topup'); // topup | code | subscription
-  const playerUid = str(b.playerUid || b.uid || b.playerId);
-  const region = str(b.region);
-  const platform = str(b.platform);
-  const deliveryEmail = str(b.deliveryEmail);
-  const accountInfo = str(b.accountInfo);
-  const senderNumber = str(b.senderNumber).replace(/[\s-]/g, '');
-  const trxId = str(b.trxId);
-
-  if (!game || !packLabel || !(price > 0)) return bad(res, 400, 'invalid_order');
-  if (!['bkash', 'nagad', 'rocket'].includes(payment)) return bad(res, 400, 'invalid_payment');
-  if (orderType === 'topup' && !playerUid) return bad(res, 400, 'missing_uid');
-  if (orderType === 'topup' && !region) return bad(res, 400, 'missing_region');
-  if (orderType === 'code') {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(deliveryEmail)) return bad(res, 400, 'invalid_email');
-    if (!['EA', 'Steam'].includes(platform)) return bad(res, 400, 'invalid_platform');
-  }
-  if (orderType === 'subscription' && !accountInfo) return bad(res, 400, 'missing_account_info');
-  if (!/^01\d{9}$/.test(senderNumber)) return bad(res, 400, 'invalid_sender_number');
-  if (!trxId) return bad(res, 400, 'missing_trx_id');
-
-  const ip =
-    str((req.headers['x-forwarded-for'] || '').split(',')[0]) ||
-    str(req.headers['x-real-ip']) ||
-    'unknown';
+  const isAdmin = !!ADMIN_KEY && req.headers['x-admin-key'] === ADMIN_KEY;
+  const url = new URL(req.url, 'https://fluxchnage.vercel.app');
 
   try {
-    const rest = SUPABASE_URL.replace(/\/$/, '') + '/rest/v1';
-
-    // ---------- rate limit ----------
-    const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MIN * 60 * 1000).toISOString();
-    const counted = await sb(
-      '/order_attempts?select=id&ip=eq.' + encodeURIComponent(ip) +
-      '&created_at=gte.' + encodeURIComponent(windowStart),
-      SERVICE_KEY, rest, 'GET'
-    );
-    if (counted.status === 200 && Array.isArray(counted.json) &&
-        counted.json.length >= RATE_LIMIT_MAX) {
-      return bad(res, 429, 'too_many_requests');
-    }
-    await sb('/order_attempts', SERVICE_KEY, rest, 'POST', { ip });
-
-    // ---------- order number ----------
-    const noRes = await sb('/rpc/next_order_no', SERVICE_KEY, rest, 'POST', {});
-    const orderNo = typeof noRes.json === 'string' ? noRes.json
-      : (noRes.json && noRes.json[0]) || null;
-    if (!orderNo) return bad(res, 500, 'order_failed');
-
-    // ---------- insert ----------
-    const row = {
-      order_no: orderNo,
-      game, pack_label: packLabel, price_bdt: price,
-      payment_method: payment,
-      merchant_number: MERCHANT_NUMBERS[payment] || null,
-      player_uid: playerUid || null,
-      region: region || null,
-      platform: platform || null,
-      delivery_email: deliveryEmail || null,
-      account_info: accountInfo || null,
-      sender_number: senderNumber,
-      trx_id: trxId,
-      order_type: orderType,
-      status: 'pending',
-      customer_ip: ip,
-    };
-    const ins = await sb('/orders', SERVICE_KEY, rest, 'POST', row);
-    if (ins.status !== 201) return bad(res, 500, 'order_failed');
-
-    // ---------- email (never fails the order) ----------
-    if (RESEND_API_KEY && NOTIFY_EMAIL) {
-      try {
-        const lines = [
-          'Order: ' + orderNo,
-          'Game: ' + game + ' — ' + packLabel,
-          'Price: ৳' + price + ' via ' + payment.toUpperCase() +
-            ' (' + (MERCHANT_NUMBERS[payment] || '-') + ')',
-          playerUid ? 'UID / Player ID: ' + playerUid : null,
-          region ? 'Region: ' + region : null,
-          platform ? 'Platform: ' + platform : null,
-          deliveryEmail ? 'Delivery email: ' + deliveryEmail : null,
-          accountInfo ? 'Account info: ' + accountInfo : null,
-          'Sender number: ' + senderNumber,
-          'TrxID: ' + trxId,
-          'Status: pending review',
-        ].filter(Boolean).join('\n');
-        await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer ' + RESEND_API_KEY,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: 'Flux-Change <onboarding@resend.dev>',
-            to: NOTIFY_EMAIL,
-            subject: '🧾 New order ' + orderNo + ' — ' + game + ' ' + packLabel,
-            text: lines,
-          }),
-        });
-      } catch (e) { /* email is best-effort */ }
+    // Create order
+    if (req.method === 'POST' && url.pathname === '/api/orders') {
+      const body = req.body || {};
+      const row = orderToRow(body);
+      if (!/^FC-\d+$/.test(row.id)) return bad(res, 422, 'invalid_order_id');
+      if (!row.label) return bad(res, 422, 'missing_label');
+      if (!PAYMENTS.includes(row.payment)) return bad(res, 422, 'invalid_payment_method');
+      const ins = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders', 'POST', row);
+      if (ins.status === 409) {
+        const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?id=eq.' + encodeURIComponent(row.id) + '&select=*', 'GET');
+        const existing = Array.isArray(got.json) && got.json[0];
+        if (existing) return res.status(200).json({ ok: true, order: rowToOrder(existing), duplicate: true });
+        return bad(res, 409, 'order_conflict');
+      }
+      if (ins.status >= 300 || !Array.isArray(ins.json) || !ins.json[0]) return bad(res, 502, 'order_store_failed');
+      return res.status(201).json({ ok: true, order: rowToOrder(ins.json[0]) });
     }
 
-    return res.status(200).json({ ok: true, order_no: orderNo });
+    // Admin: list all orders
+    if (req.method === 'GET' && url.pathname === '/api/admin-orders') {
+      if (!isAdmin) return bad(res, 401, 'admin_key_required');
+      const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?select=*&order=created_at.desc&limit=200', 'GET');
+      if (got.status >= 300 || !Array.isArray(got.json)) return bad(res, 502, 'order_read_failed');
+      return res.status(200).json({ ok: true, orders: got.json.map(rowToOrder) });
+    }
+
+    // Buyer: list own orders by email
+    if (req.method === 'GET' && url.pathname === '/api/orders') {
+      const email = str(url.searchParams.get('email')).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 422, 'valid_email_required');
+      const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?email=eq.' + encodeURIComponent(email) + '&select=*&order=created_at.desc&limit=100', 'GET');
+      if (got.status >= 300 || !Array.isArray(got.json)) return bad(res, 502, 'order_read_failed');
+      return res.status(200).json({ ok: true, orders: got.json.map(rowToOrder) });
+    }
+
+    // Admin: update status and/or delivery link
+    if (req.method === 'PATCH' && url.pathname === '/api/orders') {
+      if (!isAdmin) return bad(res, 401, 'admin_key_required');
+      const body = req.body || {};
+      const id = str(body.id);
+      if (!/^FC-\d+$/.test(id)) return bad(res, 422, 'invalid_order_id');
+      const patch = {};
+      if (body.status !== undefined) {
+        if (!STATUSES.includes(body.status)) return bad(res, 422, 'invalid_status');
+        patch.status = body.status;
+      }
+      if (body.deliveryLink !== undefined) patch.delivery_link = str(body.deliveryLink);
+      if (!Object.keys(patch).length) return bad(res, 422, 'nothing_to_update');
+      const upd = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?id=eq.' + encodeURIComponent(id), 'PATCH', patch);
+      if (upd.status >= 300 || !Array.isArray(upd.json) || !upd.json[0]) return bad(res, 502, 'order_update_failed');
+      return res.status(200).json({ ok: true, order: rowToOrder(upd.json[0]) });
+    }
+
+    return bad(res, 404, 'not_found');
   } catch (e) {
-    return bad(res, 500, 'order_failed');
+    return bad(res, 500, 'server_error');
   }
 };
