@@ -109,15 +109,15 @@ module.exports = async (req, res) => {
         if (existing) return res.status(200).json({ ok: true, order: rowToOrder(existing), duplicate: true });
         return bad(res, 409, 'order_conflict');
       }
-      if (ins.status >= 300 || !Array.isArray(ins.json) || !ins.json[0]) return bad(res, 502, 'order_store_failed');
+      if (ins.status >= 300 || !Array.isArray(ins.json) || !ins.json[0]) return res.status(502).json({ ok: false, error: 'order_store_failed', sb: ins.status });
       return res.status(201).json({ ok: true, order: rowToOrder(ins.json[0]) });
     }
 
     // Admin: list all orders
-    if (req.method === 'GET' && url.pathname === '/api/admin-orders') {
+    if (req.method === 'GET' && url.pathname === '/api/orders' && url.searchParams.get('scope') === 'admin') {
       if (!isAdmin) return bad(res, 401, 'admin_key_required');
       const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?select=*&order=created_at.desc&limit=200', 'GET');
-      if (got.status >= 300 || !Array.isArray(got.json)) return bad(res, 502, 'order_read_failed');
+      if (got.status >= 300 || !Array.isArray(got.json)) return res.status(502).json({ ok: false, error: 'order_read_failed', sb: got.status });
       return res.status(200).json({ ok: true, orders: got.json.map(rowToOrder) });
     }
 
@@ -126,7 +126,7 @@ module.exports = async (req, res) => {
       const email = str(url.searchParams.get('email')).toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 422, 'valid_email_required');
       const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?email=eq.' + encodeURIComponent(email) + '&select=*&order=created_at.desc&limit=100', 'GET');
-      if (got.status >= 300 || !Array.isArray(got.json)) return bad(res, 502, 'order_read_failed');
+      if (got.status >= 300 || !Array.isArray(got.json)) return res.status(502).json({ ok: false, error: 'order_read_failed', sb: got.status });
       return res.status(200).json({ ok: true, orders: got.json.map(rowToOrder) });
     }
 
@@ -144,7 +144,7 @@ module.exports = async (req, res) => {
       if (body.deliveryLink !== undefined) patch.delivery_link = str(body.deliveryLink);
       if (!Object.keys(patch).length) return bad(res, 422, 'nothing_to_update');
       const upd = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?id=eq.' + encodeURIComponent(id), 'PATCH', patch);
-      if (upd.status >= 300 || !Array.isArray(upd.json) || !upd.json[0]) return bad(res, 502, 'order_update_failed');
+      if (upd.status >= 300 || !Array.isArray(upd.json) || !upd.json[0]) return res.status(502).json({ ok: false, error: 'order_update_failed', sb: upd.status });
       return res.status(200).json({ ok: true, order: rowToOrder(upd.json[0]) });
     }
 
