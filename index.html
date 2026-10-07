@@ -175,6 +175,19 @@
     @media(max-width:850px){.site-footer{margin:0 14px 90px;padding:22px 18px 16px;border-radius:18px}.footer-main{grid-template-columns:1fr;gap:22px}.footer-groups{grid-template-columns:repeat(2,minmax(0,1fr))}.footer-brand p{font-size:11px}.footer-contact a{width:42px;height:42px}.footer-group summary{min-height:42px;padding-top:14px}.footer-links a,.footer-links button{font-size:9px;min-height:26px}.footer-payment{align-items:flex-start;flex-direction:column}.payment-strip{justify-content:flex-start}.footer-bottom{line-height:1.5}}
     @media(max-width:430px){.site-footer{margin-left:10px;margin-right:10px;padding:20px 14px 15px}.footer-groups{grid-template-columns:1fr}.footer-bottom{flex-direction:column}}
   .legal-backdrop{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:18px;background:rgba(4,7,12,.72);backdrop-filter:blur(8px);opacity:0;pointer-events:none;transition:opacity var(--motion-duration) var(--motion-ease)}.legal-backdrop.open{opacity:1;pointer-events:auto}.legal-modal{position:relative;width:min(440px,100%);max-height:82vh;overflow-y:auto;border:1px solid var(--card-border);border-radius:18px;background:linear-gradient(145deg,rgba(18,24,36,.97),rgba(9,13,20,.97));box-shadow:0 24px 60px rgba(0,0,0,.5);padding:22px 20px 18px;color:#c7d0dd}.legal-modal h3{margin:0 28px 10px 0;color:#fff;font:700 20px/1.15 Rajdhani,sans-serif;letter-spacing:.04em;text-transform:uppercase}.legal-modal p{margin:0;font-size:11px;line-height:1.7}.legal-close{position:absolute;top:10px;right:12px;width:30px;height:30px;border:1px solid rgba(255,255,255,.12);border-radius:50%;background:#0b111b;color:#d9dfe7;font-size:16px;line-height:1;cursor:pointer}
+    /* Lite-motion pass (2026-10-07): GPU-only motion — transform/opacity animate, paint-heavy effects run once or not at all. */
+    .theme-fx{will-change:opacity;transform:translateZ(0)}
+    button:not(.game-card){transition-duration:.18s!important;transition-timing-function:ease-out!important}
+    button:not(.game-card):active{transform:scale(.96)}
+    .pack,.subscription-card,.catalog-chip{animation:none}
+    .pack:nth-child(-n+6),.subscription-card:nth-child(-n+6){animation:staggerSwitch .28s var(--motion-ease) both}
+    .catalog-group{animation:none;content-visibility:auto;contain-intrinsic-size:auto 140px}
+    @media(max-width:850px){
+      .drawer-backdrop,.legal-backdrop,.menu,.rail-offer,.rail-action{backdrop-filter:none;-webkit-backdrop-filter:none}
+      .drawer-backdrop{background:rgba(0,0,0,.74)}
+      .legal-backdrop{background:rgba(4,7,12,.82)}
+      .menu{background:linear-gradient(135deg,rgba(29,36,49,.95),rgba(7,11,18,.93))}
+    }
     </style>
 </head>
 <body>
@@ -355,7 +368,7 @@
     function closeAccount(){accountBackdrop.classList.remove('open');accountBackdrop.setAttribute('aria-hidden','true')}
     function toast(message){var el=document.getElementById('toast');el.textContent=message;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(function(){el.classList.remove('show')},2200)}
     function copyText(value){if(navigator.clipboard&&navigator.clipboard.writeText)return navigator.clipboard.writeText(value);return new Promise(function(resolve,reject){var input=document.createElement('textarea');input.value=value;input.setAttribute('readonly','');input.style.position='fixed';input.style.opacity='0';document.body.appendChild(input);input.select();try{if(document.execCommand('copy'))resolve();else reject(new Error('Copy unavailable'))}catch(error){reject(error)}document.body.removeChild(input)})}
-    document.addEventListener('click',function(e){if(e.target&&e.target.id==='saveAdminKey'){var keyInput=document.getElementById('adminKeyInput');adminApiKey=keyInput?keyInput.value.trim():'';adminKeyDraft=adminApiKey;try{localStorage.setItem('fc_admin_key',adminApiKey)}catch(err){}toast(adminApiKey?'Backend key saved':'Backend key cleared');if(adminApiKey)fetchAdminOrders();return}var target=e.target.closest('button');if(!target)return;if(!target.matches('[data-index]')){target.classList.remove('button-pulse');void target.offsetWidth;target.classList.add('button-pulse');setTimeout(function(){target.classList.remove('button-pulse')},320)}
+    document.addEventListener('click',function(e){if(e.target&&e.target.id==='saveAdminKey'){var keyInput=document.getElementById('adminKeyInput');adminApiKey=keyInput?keyInput.value.trim():'';adminKeyDraft=adminApiKey;try{localStorage.setItem('fc_admin_key',adminApiKey)}catch(err){}toast(adminApiKey?'Backend key saved':'Backend key cleared');if(adminApiKey)fetchAdminOrders();return}var target=e.target.closest('button');if(!target)return;
       if(target.matches('[data-index]'))selectGame(Number(target.dataset.index));
       else if(target.dataset.subscription!==undefined){state.subscription=Number(target.dataset.subscription);renderSubscriptions();updateViewText()}
       else if(target.dataset.subPlan!==undefined){state.cart++;document.getElementById('cartCount').textContent=state.cart;openDrawer(subscription().plans[Number(target.dataset.subPlan)],'subscription')}
