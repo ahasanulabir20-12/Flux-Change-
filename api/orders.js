@@ -95,6 +95,19 @@ module.exports = async (req, res) => {
   const url = new URL(req.url, 'https://fluxchnage.vercel.app');
 
   try {
+    // Sign-in record: remember a signed-in customer (email + name), upserted by email
+    if (req.method === 'POST' && url.pathname === '/api/orders' && url.searchParams.get('kind') === 'signin') {
+      const body = req.body || {};
+      const email = str(body.email).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 422, 'valid_email_required');
+      const row = { email: email, last_seen: new Date().toISOString() };
+      const name = str(body.name);
+      if (name) row.name = name;
+      const up = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/customers', 'POST', row, 'resolution=merge-duplicates,return=representation');
+      if (up.status >= 300 || !Array.isArray(up.json) || !up.json[0]) return res.status(502).json({ ok: false, error: 'customer_store_failed', sb: up.status });
+      return res.status(200).json({ ok: true });
+    }
+
     // Create order
     if (req.method === 'POST' && url.pathname === '/api/orders') {
       const body = req.body || {};
@@ -119,6 +132,14 @@ module.exports = async (req, res) => {
       const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/orders?select=*&order=created_at.desc&limit=200', 'GET');
       if (got.status >= 300 || !Array.isArray(got.json)) return res.status(502).json({ ok: false, error: 'order_read_failed', sb: got.status });
       return res.status(200).json({ ok: true, orders: got.json.map(rowToOrder) });
+    }
+
+    // Admin: list signed-in customers
+    if (req.method === 'GET' && url.pathname === '/api/orders' && url.searchParams.get('scope') === 'customers') {
+      if (!isAdmin) return bad(res, 401, 'admin_key_required');
+      const got = await sb(SUPABASE_URL, SERVICE_KEY, '/rest/v1/customers?select=*&order=last_seen.desc&limit=500', 'GET');
+      if (got.status >= 300 || !Array.isArray(got.json)) return res.status(502).json({ ok: false, error: 'customer_read_failed', sb: got.status });
+      return res.status(200).json({ ok: true, customers: got.json.map(function (r) { return { email: r.email || '', name: r.name || '', firstSeen: r.first_seen || '', lastSeen: r.last_seen || '' }; }) });
     }
 
     // Buyer: list own orders by email
