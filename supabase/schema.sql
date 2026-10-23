@@ -38,3 +38,18 @@ begin new.updated_at = now(); return new; end; $$;
 drop trigger if exists orders_touch on public.orders;
 create trigger orders_touch before update on public.orders
 for each row execute function public.touch_orders_updated_at();
+
+-- Signed-in customers: one row per account email, written by the API
+-- whenever a customer signs in on the site (added 2026-10-23).
+create table if not exists public.customers (
+  email text primary key,               -- customer's sign-in email (lowercase)
+  name text not null default '',        -- display name when Google provides one
+  first_seen timestamptz not null default now(),
+  last_seen timestamptz not null default now()
+);
+
+alter table public.customers enable row level security;
+
+-- SQL-created tables are not auto-exposed to the Data API; grant explicitly.
+grant all on table public.customers to service_role;
+grant select, insert, update, delete on table public.customers to anon, authenticated;
